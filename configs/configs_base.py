@@ -253,7 +253,16 @@ model_configs = {
             "dropout": 0.25,
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),
             "hidden_scale_up": GlobalConfigValue("hidden_scale_up"),
+            "c_time_emb": 0,
+            "adapter_bottleneck": 32,
         },
+        # TimeEmbedder: set to None to disable (default).
+        # Enable by uncommenting or overriding in model_type config.
+        # "time_embedder": {
+        #     "c_time_emb": 256,
+        #     "d_mlp": 512,
+        #     "max_period": 1e5,
+        # },
         "diffusion_module": {
             "use_fine_grained_checkpoint": True,
             "sigma_data": GlobalConfigValue("sigma_data"),

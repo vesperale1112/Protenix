@@ -35,6 +35,7 @@ from protenix.model.modules.embedders import (
     ConstraintEmbedder,
     InputFeatureEmbedder,
     RelativePositionEncoding,
+    TimeEmbedder,
 )
 from protenix.model.modules.head import DistogramHead
 from protenix.model.modules.pairformer import (
@@ -133,6 +134,11 @@ class Protenix(nn.Module):
             **configs.model.constraint_embedder
         )
         self.pairformer_stack = PairformerStack(**configs.model.pairformer)
+        # Time embedder for temporal conditioning (delta_t in ps)
+        time_emb_configs = configs.model.get("time_embedder", None)
+        self.time_embedder = (
+            TimeEmbedder(**time_emb_configs) if time_emb_configs is not None else None
+        )
         self.diffusion_module = DiffusionModule(**configs.model.diffusion_module)
         self.distogram_head = DistogramHead(**configs.model.distogram_head)
         self.confidence_head = ConfidenceHead(**configs.model.confidence_head)
@@ -230,6 +236,12 @@ class Protenix(nn.Module):
         z = torch.zeros_like(z_init)
         s = torch.zeros_like(s_init)
 
+        # Compute time embedding (once, shared across all cycles)
+        t_emb = None
+        delta_t = input_feature_dict.get("delta_t", None)
+        if delta_t is not None and self.time_embedder is not None:
+            t_emb = self.time_embedder(delta_t)  # [B, c_time_emb]
+
         # Line 7-13 recycling
         for cycle_no in range(N_cycle):
             with torch.set_grad_enabled(
@@ -293,6 +305,7 @@ class Protenix(nn.Module):
                     triangle_attention=self.configs.triangle_attention,
                     inplace_safe=inplace_safe,
                     chunk_size=chunk_size,
+                    t_emb=t_emb,
                 )
 
         if self.train_confidence_only:

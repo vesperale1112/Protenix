@@ -45,6 +45,27 @@
 
 """
 model_configs = {
+    "protenix_base_rna_temporal_v1.0.0": {
+        "model": {
+            "N_cycle": 4,
+            "template_embedder": {
+                "n_blocks": 2,
+            },
+            "time_embedder": {
+                "c_time_emb": 256,
+                "d_mlp": 512,
+                "max_period": 1e5,
+            },
+            "pairformer": {
+                "c_time_emb": 256,
+                "adapter_bottleneck": 32,
+            },
+        },
+        "sample_diffusion": {
+            "N_step": 200,
+        },
+        "load_strict": False,
+    },
     "protenix_base_default_v1.0.0": {
         "model": {
             "N_cycle": 10,

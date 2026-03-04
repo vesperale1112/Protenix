@@ -216,6 +216,46 @@ class PairformerBlock(nn.Module):
         return s, z
 
 
+class TimeInjectionAdapter(nn.Module):
+    """Bottleneck residual adapter that injects time embedding into pair representation z.
+
+    Placed AFTER each PairformerBlock. Uses zero-initialized output projection
+    so the adapter is identity at init (preserves pretrained weights).
+
+    Args:
+        c_z (int): pair embedding dimension. Defaults to 128.
+        c_time_emb (int): time embedding dimension. Defaults to 256.
+        d (int): bottleneck dimension. Defaults to 32.
+    """
+
+    def __init__(self, c_z: int = 128, c_time_emb: int = 256, d: int = 32) -> None:
+        super(TimeInjectionAdapter, self).__init__()
+        self.norm = LayerNorm(c_z)
+        self.linear_z_in = LinearNoBias(c_z, d)
+        self.linear_t = LinearNoBias(c_time_emb, d)
+        self.act = nn.SiLU()
+        self.linear_out = LinearNoBias(d, c_z)
+        # Zero init: adapter outputs 0 at start → no perturbation to pretrained z
+        nn.init.zeros_(self.linear_out.weight)
+
+    def forward(self, z: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            z (torch.Tensor): pair embedding
+                [B, N_token, N_token, c_z]
+            t_emb (torch.Tensor): time embedding
+                [B, c_time_emb]
+
+        Returns:
+            torch.Tensor: adapter output (to be added as residual to z)
+                [B, N_token, N_token, c_z]
+        """
+        h = self.linear_z_in(self.norm(z))          # [B, N, N, d]
+        t = self.linear_t(t_emb)[:, None, None, :]  # [B, 1, 1, d]  broadcast
+        h = self.act(h + t)
+        return self.linear_out(h)                    # [B, N, N, c_z]
+
+
 class PairformerStack(nn.Module):
     """
     Implements Algorithm 17 [PairformerStack] in AF3
@@ -241,6 +281,8 @@ class PairformerStack(nn.Module):
         dropout: float = 0.25,
         blocks_per_ckpt: Optional[int] = None,
         hidden_scale_up: bool = False,
+        c_time_emb: int = 0,
+        adapter_bottleneck: int = 32,
     ) -> None:
         super(PairformerStack, self).__init__()
         self.n_blocks = n_blocks
@@ -259,6 +301,14 @@ class PairformerStack(nn.Module):
             )
             self.blocks.append(block)
 
+        # Time injection adapters (one per block)
+        self.use_time = c_time_emb > 0
+        if self.use_time:
+            self.time_adapters = nn.ModuleList([
+                TimeInjectionAdapter(c_z=c_z, c_time_emb=c_time_emb, d=adapter_bottleneck)
+                for _ in range(n_blocks)
+            ])
+
     def _prep_blocks(
         self,
         pair_mask: Optional[torch.Tensor],
@@ -266,9 +316,11 @@ class PairformerStack(nn.Module):
         triangle_attention: str = "torch",
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        t_emb: Optional[torch.Tensor] = None,
     ):
-        blocks = [
-            partial(
+        wrapped = []
+        for i, b in enumerate(self.blocks):
+            block_fn = partial(
                 b,
                 pair_mask=pair_mask,
                 triangle_multiplicative=triangle_multiplicative,
@@ -276,9 +328,18 @@ class PairformerStack(nn.Module):
                 inplace_safe=inplace_safe,
                 chunk_size=chunk_size,
             )
-            for b in self.blocks
-        ]
-        return blocks
+            if self.use_time and t_emb is not None:
+                adapter = self.time_adapters[i]
+                def _make_wrapped(bf, ad, te):
+                    def _wrapped(s, z):
+                        s, z = bf(s, z)
+                        z = z + ad(z, te)
+                        return s, z
+                    return _wrapped
+                wrapped.append(_make_wrapped(block_fn, adapter, t_emb))
+            else:
+                wrapped.append(block_fn)
+        return wrapped
 
     def forward(
         self,
@@ -289,6 +350,7 @@ class PairformerStack(nn.Module):
         triangle_attention: str = "torch",
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        t_emb: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -307,6 +369,8 @@ class PairformerStack(nn.Module):
                 - "deepspeed": DeepSpeed's fused attention kernel
             inplace_safe (bool): Whether it is safe to use inplace operations. Defaults to False.
             chunk_size (Optional[int]): Chunk size for memory-efficient operations. Defaults to None.
+            t_emb (Optional[torch.Tensor]): time embedding from TimeEmbedder.
+                [B, c_time_emb]. Defaults to None (no time injection).
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]: the update of s and z
@@ -319,6 +383,7 @@ class PairformerStack(nn.Module):
             triangle_attention=triangle_attention,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
+            t_emb=t_emb,
         )
 
         blocks_per_ckpt = self.blocks_per_ckpt

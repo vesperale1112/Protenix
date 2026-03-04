@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Any, Optional
 
 import torch
@@ -246,6 +247,54 @@ class FourierEmbedding(nn.Module):
         return torch.cos(
             input=2 * torch.pi * (t_hat_noise_level.unsqueeze(dim=-1) * self.w + self.b)
         )
+
+
+class TimeEmbedder(nn.Module):
+    """Sinusoidal time embedding for delta_t (in picoseconds).
+
+    Converts a scalar delta_t per sample into a fixed-dim vector using
+    log-spaced sinusoidal frequencies (DDPM-style) followed by an MLP.
+
+    Args:
+        c_time_emb (int): output embedding dimension. Defaults to 256.
+        d_mlp (int): hidden dimension of the MLP. Defaults to 512.
+        max_period (float): maximum period for the lowest frequency.
+            Should cover the full delta_t range. Defaults to 1e5 (for ps).
+    """
+
+    def __init__(
+        self,
+        c_time_emb: int = 256,
+        d_mlp: int = 512,
+        max_period: float = 1e5,
+    ) -> None:
+        super(TimeEmbedder, self).__init__()
+        half_dim = c_time_emb // 2
+        # Fixed log-spaced frequencies: from 1.0 down to 1/max_period
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(half_dim, dtype=torch.float32) / half_dim
+        )
+        self.register_buffer("freqs", freqs)  # [half_dim]
+        self.mlp = nn.Sequential(
+            nn.Linear(c_time_emb, d_mlp),
+            nn.SiLU(),
+            nn.Linear(d_mlp, c_time_emb),
+        )
+
+    def forward(self, delta_t: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            delta_t (torch.Tensor): time difference in picoseconds
+                [B]
+
+        Returns:
+            torch.Tensor: time embedding
+                [B, c_time_emb]
+        """
+        # delta_t: [B] -> args: [B, half_dim]
+        args = delta_t[:, None].float() * self.freqs[None, :]
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)  # [B, c_time_emb]
+        return self.mlp(emb)
 
 
 class SubstructureEmbedder(nn.Module):
